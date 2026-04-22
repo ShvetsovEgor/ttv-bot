@@ -1,8 +1,7 @@
 import json
 import logging
-import re
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Generator
 import openai
 
 from config import Settings
@@ -10,7 +9,18 @@ from database import AppDB
 
 logger = logging.getLogger(__name__)
 
-
+REQUIRED_RAG_INTENTS = {"BP", "GRANTS", "FORUMS", "TVOYHOD", "DP"}
+INDEX_REFUSAL_PATTERNS = (
+    "без доступа к актуальным данным",
+    "без доступа к данным",
+    "без доступа к информации",
+    "не могу предоставить",
+    "не могу предоставить календарные сроки",
+    "не могу предоставить сроки",
+    "к сожалению, без доступа",
+    "не могу получить данные через инструмент",
+    "without access to",
+)
 class PromptAgentClient:
     def __init__(self, cfg: Settings, db: AppDB):
         self.client = openai.OpenAI(
@@ -21,7 +31,6 @@ class PromptAgentClient:
         self.project_id = cfg.yc_project_id
         self.db = db
 
-        # Маппинг баз знаний берем из конфига
         self.vs_map = {
             "FORUMS": cfg.vs_forums,
             "TVOYHOD": cfg.vs_tvoyhod,
@@ -31,54 +40,52 @@ class PromptAgentClient:
         }
 
         self.prompts = {
-            "TVOYHOD": (
-                "Ты — федеральный эксперт и наставник всероссийского студенческого проекта «Твой Ход». "
-                "Твоя задача — консультировать студентов по трекам проекта (например, «Делаю», «Первопроходец»), "
-                "правилам участия, формированию портфолио и получению премии в 1 миллион рублей. "
-                "Отвечай мотивирующе, энергично и по существу. Используй молодежный, но профессиональный стиль общения. "
-                "Опирайся на официальные правила проекта."
-            ),
-            "BP": (
-                "Ты — дружелюбный наставник всероссийского конкурса «Большая Перемена». "
-                "Помогай школьникам (5-10 классы) и студентам колледжей (СПО) разбираться в вызовах конкурса, "
-                "этапах прохождения (от знакомства до финала), решении кейсов и командной работе. "
-                "Поддерживай их, вселяй уверенность и объясняй сложные правила конкурса простым и доступным языком. "
-                "Твой тон — эмпатичный, поддерживающий и воодушевляющий."
-            ),
-            "DP": (
-                "Ты — энергичный координатор Общероссийского общественно-государственного движения детей и молодежи «Движение Первых». "
-                "Твоя цель — рассказывать детям, их родителям и наставникам о ценностях движения, "
-                "флагманских проектах, акциях и возможностях для саморазвития. "
-                "Будь позитивным, инклюзивным и всегда подчеркивай важность созидательного труда и любви к Родине."
-            ),
-            "GRANTS": (
-                "Ты — строгий, компетентный и объективный федеральный эксперт конкурса «Росмолодежь.Гранты». "
-                "Консультируй пользователей по правилам подачи заявок, формированию сметы, описанию социальной значимости, "
-                "календарному плану и критериям оценки (актуальность, масштабность, публичность и т.д.). "
-                "Отвечай профессионально, четко, структурно и без лишней воды. Давай конструктивные советы по улучшению проектов."
-            ),
-            "FORUMS": (
-                "Ты — специалист по форумной кампании Росмолодежи. Помогай пользователям ориентироваться в линейке "
-                "всероссийских и окружных форумов (например, «ШУМ», «Территория смыслов», «Таврида», «Машук», «ОстроVа» и др.). "
-                "Подробно объясняй процесс регистрации через ФГАИС «Молодежь России», требования к участникам, "
-                "написание мотивационных писем и этапы отбора. Будь полезным и точным навигатором."
-            ),
-            "GENERAL": (
-                "Ты — дружелюбный ИИ-навигатор по молодежной политике Республики Татарстан и проектам АНО «Татарстан — территория возможностей» (ТТВ). "
-                "Отвечай на общие вопросы вежливо, позитивно и кратко. Помогай пользователям найти нужную информацию о "
-                "молодежных событиях в Татарстане и России. Если запрос не относится к конкретному проекту, давай универсальный, но полезный ответ."
-            )
+            "TVOYHOD": "Ты — федеральный эксперт проекта «Твой Ход»...",
+            "BP": "Ты — наставник конкурса «Большая Перемена»...",
+            "DP": "Ты — координатор «Движения Первых»...",
+            "GRANTS": "Ты — эксперт Росмолодежь.Гранты.",
+            "FORUMS": "Ты — специалист по форумам Росмолодежи.",
+            "GENERAL": "Ты — ИИ-навигатор по проектам Татарстана."
         }
 
         self.memory_path = Path("bot_memory.json")
         self.memory = self._load_memory()
 
+    def _build_search_tool(self, intent: str) -> list[dict[str, Any]] | None:
+        """
+        Возвращает описание инструмента file_search для vector store.
+        """
+        index_id = (self.vs_map.get(intent) or "").strip()
+        if not index_id:
+            return None
+
+        return [
+            {
+                "type": "file_search",
+                "vector_store_ids": [index_id],
+            }
+        ]
+
+    @staticmethod
+    def _sanitize_index_refusal(text: str) -> str:
+        text = (text or "").strip()
+        lowered = text.lower()
+        if any(pattern in lowered for pattern in INDEX_REFUSAL_PATTERNS):
+            return (
+                "Уточните, пожалуйста, сезон/год конкурса и этап (регистрация, полуфинал, финал), "
+                "чтобы я дал точные сроки по индексу."
+            )
+        return text
+
     def _load_memory(self) -> Dict[str, Any]:
-        if not self.memory_path.exists(): return {"conversations": {}, "states": {}}
+        if not self.memory_path.exists():
+            return {"conversations": {}, "states": {}, "projects": {}}
         try:
-            return json.loads(self.memory_path.read_text(encoding="utf-8"))
-        except:
-            return {"conversations": {}, "states": {}}
+            data = json.loads(self.memory_path.read_text(encoding="utf-8"))
+            if "projects" not in data: data["projects"] = {}
+            return data
+        except Exception:
+            return {"conversations": {}, "states": {}, "projects": {}}
 
     def _save_memory(self):
         self.memory_path.write_text(json.dumps(self.memory, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -90,74 +97,90 @@ class PromptAgentClient:
     def get_state(self, user_id: str) -> str:
         return self.memory["states"].get(user_id, "DEFAULT")
 
+    def set_project(self, user_id: str, project: str):
+        self.memory["projects"][user_id] = project
+        self._save_memory()
+
+    def get_project(self, user_id: str) -> str:
+        return self.memory["projects"].get(user_id, "GENERAL")
+
     def reset_user(self, user_id: str):
         self.memory["conversations"].pop(user_id, None)
         self.memory["states"].pop(user_id, None)
+        self.memory["projects"].pop(user_id, None)
         self._save_memory()
 
     def _classify_intent(self, text: str) -> str:
-        prompt = (
-            "Определи проект: TVOYHOD, BP, DP, GRANTS, FORUMS или GENERAL. "
-            "Ответь только одним словом."
-        )
         try:
-            res = self.client.responses.create(
+            res = self.client.chat.completions.create(
                 model=f"gpt://{self.project_id}/yandexgpt-lite",
-                input=text,
-                instructions=prompt,
-                max_output_tokens=5,
+                messages=[{"role": "system",
+                           "content": "Определи проект: TVOYHOD, BP, DP, GRANTS, FORUMS или GENERAL. Одно слово."},
+                          {"role": "user", "content": text}],
+                max_tokens=5,
                 temperature=0.0
             )
-            intent = getattr(res, "output_text", "GENERAL").strip().upper()
-            return re.sub(r'[^A-Z]', '', intent)
-        except:
+            return res.choices[0].message.content.strip().upper()
+        except Exception:
             return "GENERAL"
 
-    def ask(self, user_id: str, text: str) -> str:
-        state = self.get_state(user_id)
-        conv_id = self.memory["conversations"].get(user_id)
-
-        if state == "CHECK_GRANT":
-            res = self.client.responses.create(
-                model=f"gpt://{self.project_id}/yandexgpt",
-                input=text,
-                instructions="Ты федеральный эксперт Росмолодежь.Гранты. Оцени заявку."
-            )
-            self.set_state(user_id, "DEFAULT")
-            return getattr(res, "output_text", "") + "\n\n*(Режим эксперта выключен)*"
-
-        if not conv_id:
-            conv = self.client.conversations.create()
-            conv_id = conv.id
-            self.memory["conversations"][user_id] = conv_id
-            self._save_memory()
-
-        intent = self._classify_intent(text)
-        self.db.log_interaction(user_id, "AI_QUERY", intent)
+    def ask_stream(self, user_id: str, text: str, explicit_intent: str = None) -> Generator[str, None, None]:
+        intent = explicit_intent if explicit_intent else self._classify_intent(text)
+        self.db.log_interaction(user_id, "AI_QUERY_STREAM", intent)
 
         system_instruction = self.prompts.get(intent, self.prompts["GENERAL"])
-        vs_id = self.vs_map.get(intent)
+        if intent in REQUIRED_RAG_INTENTS:
+            system_instruction += (
+                "\nЕсли вопрос связан с конкурсом/проектом, обязательно ищи ответ в подключенном индексе."
+                "\nТы уже имеешь доступ к индексу через инструмент file_search."
+                "\nНикогда не пиши, что у тебя нет доступа к индексу, файлам или данным."
+            )
 
-        payload = {
+        search_tools = self._build_search_tool(intent)
+        request_kwargs: dict[str, Any] = {
             "model": f"gpt://{self.project_id}/yandexgpt-lite",
+            "instructions": system_instruction,
             "input": text,
-            "conversation": conv_id,
-            "instructions": system_instruction
         }
 
-        if vs_id:
-            payload["tools"] = [{"type": "file_search", "vector_store_ids": [vs_id]}]
+        if search_tools:
+            index_id = (self.vs_map.get(intent) or "").strip()
+            request_kwargs["tools"] = search_tools
+            self.db.log_interaction(user_id, "AI_RAG_STATUS", f"RAG_ON:{intent}")
+            logger.info(
+                "RAG_STATUS user=%s intent=%s status=RAG_ON index=%s",
+                user_id,
+                intent,
+                index_id,
+            )
+        else:
+            self.db.log_interaction(user_id, "AI_RAG_STATUS", f"RAG_OFF:{intent}")
+            logger.info("RAG_STATUS user=%s intent=%s status=RAG_OFF", user_id, intent)
 
-        res = self.client.responses.create(**payload)
-        answer = getattr(res, "output_text", "").strip()
-        answer = re.sub(r"\[search_index.*?\]", "", answer, flags=re.I).strip()
+        try:
+            response = self.client.responses.create(**request_kwargs)
+        except Exception as e:
+            if search_tools:
+                logger.warning(
+                    "Не удалось включить file_search для intent=%s: %s. Повторяем запрос без RAG.",
+                    intent,
+                    e,
+                )
+                self.db.log_interaction(user_id, "AI_RAG_STATUS", f"RAG_FALLBACK:{intent}")
+                logger.info("RAG_STATUS user=%s intent=%s status=RAG_FALLBACK", user_id, intent)
+                request_kwargs.pop("tools", None)
+                response = self.client.responses.create(**request_kwargs)
+            else:
+                raise
 
-        intent_names = {
-            "TVOYHOD": "Твой Ход", "BP": "Большая Перемена",
-            "DP": "Движение Первых", "GRANTS": "Росмолодежь.Гранты",
-            "FORUMS": "Форумная кампания"
-        }
+        content = self._sanitize_index_refusal((getattr(response, "output_text", None) or "").strip())
+        if content:
+            yield content
+        else:
+            yield "Не удалось получить текст ответа. Попробуйте уточнить запрос."
 
-        if intent in intent_names:
-            return f"🎯 _Контекст: {intent_names[intent]}_\n\n{answer}"
-        return answer
+        if search_tools:
+            # Для responses API явный маркер tool-call может не возвращаться,
+            # поэтому фиксируем неопределенный статус использования.
+            self.db.log_interaction(user_id, "AI_RAG_STATUS", f"RAG_USAGE_UNKNOWN:{intent}")
+            logger.info("RAG_STATUS user=%s intent=%s status=RAG_USAGE_UNKNOWN", user_id, intent)
