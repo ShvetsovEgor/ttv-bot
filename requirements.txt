@@ -50,3 +50,4 @@ yandex-cloud-ml-sdk==0.19.1
 yandexcloud==0.386.0
 yarl==1.23.0
 ydb==3.28.0
+sqlalchemy==2.0.29
