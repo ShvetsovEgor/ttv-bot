@@ -64,6 +64,24 @@ def get_back_kb():
     kb.row(CallbackButton(text="Назад", payload=CALLBACK_BACK))
     return kb.as_markup()
 
+
+def get_main_menu_kb():
+    kb = InlineKeyboardBuilder()
+    kb.row(CallbackButton(text="Задать вопрос", payload=CALLBACK_ASK))
+    kb.row(CallbackButton(text="📅 События недели", payload=CALLBACK_EVENTS))
+    kb.row(CallbackButton(text="Поиск молодежных центров", payload=CALLBACK_CENTERS_SEARCH))
+    kb.row(CallbackButton(text="Галерея (в разработке)", payload=CALLBACK_GALLERY))
+    kb.row(CallbackButton(text="Портфолио (в разработке)", payload=CALLBACK_PORTFOLIO))
+    kb.row(CallbackButton(text="Проверить грантовую заявку", payload=CALLBACK_GRANT_CHECK))
+    return kb.as_markup()
+
+
+async def show_main_menu_inline(event: MessageCallback, user_id: str):
+    assistant_client.reset_user(user_id)
+    assistant_client.set_state(user_id, "DEFAULT")
+    await event.answer()
+    await event.message.edit(text="👇 Главное меню:", attachments=[get_main_menu_kb()])
+
 # --- ФУНКЦИИ ПОИСКА ЦЕНТРОВ ---
 
 def search_institutions_by_locality(locality: str, max_results: int = 200) -> list[dict]:
@@ -200,15 +218,7 @@ async def send_welcome(event, user_id):
         "[Соглашение на обработку персональных данных]"
         "(https://xn-----6kcca1a0clhajkadginefbh2i.xn--p1ai/%D0%A1%D0%BE%D0%B3%D0%BB%D0%B0%D1%81%D0%B8%D0%B5%20%D0%BD%D0%B0%20%D0%9E%D0%9F%D0%94.pdf)."
     )
-    kb = InlineKeyboardBuilder()
-    kb.row(CallbackButton(text="Задать вопрос", payload=CALLBACK_ASK))
-    kb.row(CallbackButton(text="📅 События недели", payload=CALLBACK_EVENTS))
-    kb.row(CallbackButton(text="Поиск молодежных центров", payload=CALLBACK_CENTERS_SEARCH))
-    kb.row(CallbackButton(text="Галерея (в разработке)", payload=CALLBACK_GALLERY))
-    kb.row(CallbackButton(text="Портфолио (в разработке)", payload=CALLBACK_PORTFOLIO))
-    kb.row(CallbackButton(text="Проверить грантовую заявку", payload=CALLBACK_GRANT_CHECK))
-
-    markup = kb.as_markup()
+    markup = get_main_menu_kb()
     chat_id = event.chat_id if hasattr(event, 'chat_id') else event.message.recipient.chat_id
 
     if isinstance(event, MessageCallback) and event.message is not None:
@@ -319,8 +329,8 @@ async def on_callback(event: MessageCallback):
     if payload == CALLBACK_BACK:
         if state in ["CHATTING", "SEARCH_CENTER", "SELECT_PROJECT"]:
             if state == "CHATTING": await send_project_menu(event, user_id)
-            else: await send_welcome(event, user_id)
-        else: await send_welcome(event, user_id)
+            else: await show_main_menu_inline(event, user_id)
+        else: await show_main_menu_inline(event, user_id)
         return
 
     if payload == CALLBACK_ASK: await send_project_menu(event, user_id)
