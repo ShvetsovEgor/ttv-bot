@@ -256,6 +256,9 @@ async def send_project_menu(event, user_id):
 
 async def send_centers_search_prompt(event, user_id):
     assistant_client.set_state(user_id, "SEARCH_CENTER")
+    if isinstance(event, MessageCallback) and event.message is not None:
+        chat_id = str(event.message.recipient.chat_id)
+        assistant_client.set_state(chat_id, "SEARCH_CENTER")
     SEARCH_RESULTS_CACHE.pop(user_id, None)
     text = "Введите город или населенный пункт, и я найду подходящие молодежные центры."
     if isinstance(event, MessageCallback) and event.message is not None:
@@ -294,6 +297,11 @@ async def on_message(event: MessageCreated):
     chat_id = str(event.message.recipient.chat_id)
     user_id = str(event.message.sender.user_id if event.message.sender else chat_id)
     state = assistant_client.get_state(user_id)
+    if state == "DEFAULT" and user_id != chat_id:
+        chat_state = assistant_client.get_state(chat_id)
+        if chat_state != "DEFAULT":
+            state = chat_state
+            assistant_client.set_state(user_id, chat_state)
 
     if text.lower() in ["/start", "старт", "начать"]:
         await send_welcome(event, chat_id)
