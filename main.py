@@ -173,7 +173,8 @@ def get_centers_page_kb(page: int, total_count: int):
 async def send_centers_results_page(event, user_id: str, page: int):
     cached = SEARCH_RESULTS_CACHE.get(user_id)
     if not cached:
-        await bot.send_message(chat_id=user_id, text="Введите город заново:", attachments=[get_back_kb()])
+        if hasattr(event, "message") and event.message is not None:
+            await event.message.answer(text="Введите город заново:", attachments=[get_back_kb()])
         return
     results = cached["results"]
     total = len(results)
@@ -184,7 +185,8 @@ async def send_centers_results_page(event, user_id: str, page: int):
     if isinstance(event, MessageCallback) and event.message is not None:
         await event.message.edit(text=text, attachments=[markup])
     else:
-        await bot.send_message(chat_id=user_id, text=text, attachments=[markup])
+        if hasattr(event, "message") and event.message is not None:
+            await event.message.answer(text=text, attachments=[markup])
 
 # --- ОСНОВНЫЕ РАЗДЕЛЫ ---
 
