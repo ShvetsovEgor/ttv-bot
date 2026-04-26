@@ -213,16 +213,20 @@ async def send_welcome(event, user_id):
 
     if isinstance(event, MessageCallback) and event.message is not None:
         await event.answer()
-
-    welcome_attachments = []
     if IMAGE_PATH.exists():
-        welcome_attachments.append(InputMedia(str(IMAGE_PATH)))
-    welcome_attachments.append(markup)
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                attachments=[InputMedia(str(IMAGE_PATH))],
+                format=ParseMode.MARKDOWN,
+            )
+        except Exception:
+            await bot.send_message(chat_id=chat_id, text=text, format=ParseMode.MARKDOWN)
+    else:
+        await bot.send_message(chat_id=chat_id, text=text, format=ParseMode.MARKDOWN)
 
-    try:
-        await bot.send_message(chat_id=chat_id, text=text, attachments=welcome_attachments, format=ParseMode.MARKDOWN)
-    except Exception:
-        await bot.send_message(chat_id=chat_id, text=text, attachments=[markup], format=ParseMode.MARKDOWN)
+    await bot.send_message(chat_id=chat_id, text="👇 Главное меню:", attachments=[markup], format=ParseMode.MARKDOWN)
 
 
 async def send_project_menu(event, user_id):
@@ -315,13 +319,7 @@ async def on_callback(event: MessageCallback):
     if payload == CALLBACK_BACK:
         if state in ["CHATTING", "SEARCH_CENTER", "SELECT_PROJECT"]:
             if state == "CHATTING": await send_project_menu(event, user_id)
-            else:
-                if state == "SEARCH_CENTER" and event.message is not None:
-                    try:
-                        await event.message.delete()
-                    except Exception:
-                        pass
-                await send_welcome(event, user_id)
+            else: await send_welcome(event, user_id)
         else: await send_welcome(event, user_id)
         return
 
