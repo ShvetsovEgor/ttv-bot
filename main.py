@@ -142,19 +142,41 @@ def format_institutions_response(locality: str, rows: list[dict], total_count: i
     summary = f"Найдено: {total_count}. Стр. {page + 1}"
     parts = [f"📍 Организации по запросу «{locality}»:\n{summary}"]
     for idx, row in enumerate(rows, start=1):
+        name = _clean_field_value(row.get("name"), fallback="Без названия")
+        address = _clean_field_value(row.get("address_phone"), fallback="Не указан")
+        head = _clean_field_value(row.get("head_name"), fallback="Не указан")
+        resources = _clean_resources(row.get("web_resources"))
         parts.append(
-            f"{idx}) {row.get('name', 'Без названия')}\n"
-            f"   Адрес: {row.get('address_phone', 'Не указан')}\n"
-            f"   Ресурсы: {row.get('web_resources', 'Нет информации')}"
+            f"{idx}) {name}\n"
+            f"   Адрес: {address}\n"
+            f"   Руководитель: {head}\n"
+            f"   Ресурсы: {resources}"
         )
     return "\n\n".join(parts)
 
 
 def _clean_field_value(value: str | None, fallback: str = "Не указано") -> str:
-    if not value: return fallback
-    cleaned = str(value).replace("\n", " ")
+    if not value:
+        return fallback
+    cleaned = str(value).replace("\r", " ").replace("\n", " ")
+    # Склеиваем переносы, которые ломают номера телефонов и коды.
+    cleaned = re.sub(r"(\d)-\s+(\d)", r"\1-\2", cleaned)
+    cleaned = re.sub(r"\(\s*(\d+)\s*\)", r"(\1)", cleaned)
+    cleaned = re.sub(r"\s*;\s*", "; ", cleaned)
+    cleaned = re.sub(r"\s*,\s*", ", ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned or fallback
+
+
+def _clean_resources(value: str | None) -> str:
+    if not value:
+        return "Нет информации"
+    cleaned = _clean_field_value(value, fallback="Нет информации")
+    urls = re.findall(r"https?://[^\s,;]+", cleaned)
+    if urls:
+        unique_urls = list(dict.fromkeys(urls))
+        return ", ".join(unique_urls)
+    return cleaned
 
 
 def get_centers_page_kb(page: int, total_count: int):
