@@ -360,7 +360,6 @@ async def on_callback(event: MessageCallback):
         await event.message.edit(text=f"Выбрано: «{title}». Жду вопрос!", attachments=[get_back_kb()])
 
 
-
 async def main():
     logger.info("Бот запущен...")
     await dp.start_polling(bot)
