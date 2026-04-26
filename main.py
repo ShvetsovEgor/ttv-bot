@@ -315,7 +315,13 @@ async def on_callback(event: MessageCallback):
     if payload == CALLBACK_BACK:
         if state in ["CHATTING", "SEARCH_CENTER", "SELECT_PROJECT"]:
             if state == "CHATTING": await send_project_menu(event, user_id)
-            else: await send_welcome(event, user_id)
+            else:
+                if state == "SEARCH_CENTER" and event.message is not None:
+                    try:
+                        await event.message.delete()
+                    except Exception:
+                        pass
+                await send_welcome(event, user_id)
         else: await send_welcome(event, user_id)
         return
 
