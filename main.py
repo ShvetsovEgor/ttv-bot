@@ -19,12 +19,13 @@ from maxapi.types import (
 from maxapi.enums.parse_mode import ParseMode
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
-# --- ИМПОРТЫ ИЗ НАШИХ МОДУЛЕЙ ---
+# --- ИМПОРТЫ ИЗ ВАШИХ МОДУЛЕЙ ---
 from config import Settings
 from database import AppDB
 from ai_client import PromptAgentClient
 
-logging.basicConfig(level=logging.INFO)
+# Настройка логирования
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -37,7 +38,7 @@ dp = Dispatcher()
 db = AppDB()
 assistant_client = PromptAgentClient(settings, db)
 
-
+# Константы колбэков
 CALLBACK_BACK = "back"
 CALLBACK_ASK = "menu:ask"
 CALLBACK_GALLERY = "menu:gallery"
@@ -46,89 +47,25 @@ CALLBACK_GRANT_CHECK = "menu:grant_check"
 CALLBACK_CENTERS_SEARCH = "menu:centers_search"
 CALLBACK_CENTERS_PAGE_PREFIX = "centers:page:"
 CENTERS_PAGE_SIZE = 5
+
 PROJECT_PAYLOAD_MAP = {
     "project:bp": ("Большая перемена", "BP"),
     "project:tvoyhod": ("Твой Ход", "TVOYHOD"),
     "project:forums": ("Форумы", "FORUMS"),
     "project:grants": ("Гранты", "GRANTS"),
 }
+
 YOUTH_POLICY_DB_PATH = BASE_DIR / "youth_policy.db"
 SEARCH_RESULTS_CACHE: dict[str, dict] = {}
 
 
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+
 def get_back_kb():
-    """Создает клавиатуру с кнопкой 'Назад'"""
+    """Клавиатура с кнопкой Назад"""
     kb = InlineKeyboardBuilder()
     kb.row(CallbackButton(text="Назад", payload=CALLBACK_BACK))
     return kb.as_markup()
-
-
-def search_institutions_by_locality(locality: str, max_results: int = 200) -> list[dict]:
-    """Ищет молодежные учреждения по населенному пункту/городу."""
-    query = locality.strip()
-    if not query or not YOUTH_POLICY_DB_PATH.exists():
-        return []
-
-    with sqlite3.connect(YOUTH_POLICY_DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        all_rows = conn.execute(
-            """
-            SELECT name, address_phone, head_name, web_resources, activity_directions
-            FROM institutions
-            """
-        ).fetchall()
-
-    normalized_query = _normalize_for_match(query)
-    if not normalized_query:
-        return []
-
-    query_variants = _expand_locality_variants(normalized_query)
-
-    # 1) Точное включение по нормализованным строкам (unicode-safe, без ограничений SQLite NOCASE)
-    direct_matches: list[sqlite3.Row] = []
-    for row in all_rows:
-        name = _normalize_for_match(row["name"] or "")
-        address_phone = _normalize_for_match(row["address_phone"] or "")
-        combined = f"{name} {address_phone}".strip()
-        if not combined:
-            continue
-        if any(variant in combined for variant in query_variants):
-            direct_matches.append(row)
-
-    if direct_matches:
-        logger.info(
-            "CENTER_SEARCH query=%s normalized=%s direct_matches=%s",
-            locality,
-            normalized_query,
-            len(direct_matches),
-        )
-        return [dict(row) for row in direct_matches[:max_results]]
-
-    # 2) Fuzzy fallback для опечаток/вариантов написания.
-    ranked: list[tuple[float, sqlite3.Row]] = []
-    for row in all_rows:
-        name = _normalize_for_match(row["name"] or "")
-        address_phone = _normalize_for_match(row["address_phone"] or "")
-        combined = f"{name} {address_phone}".strip()
-        if not combined:
-            continue
-
-        score = max(
-            max(SequenceMatcher(None, variant, name).ratio() for variant in query_variants),
-            max(SequenceMatcher(None, variant, address_phone).ratio() for variant in query_variants),
-            max(SequenceMatcher(None, variant, combined).ratio() for variant in query_variants),
-        )
-        if score >= 0.55:
-            ranked.append((score, row))
-
-    ranked.sort(key=lambda item: item[0], reverse=True)
-    logger.info(
-        "CENTER_SEARCH query=%s normalized=%s fuzzy_matches=%s",
-        locality,
-        normalized_query,
-        len(ranked),
-    )
-    return [dict(row) for _, row in ranked[:max_results]]
 
 
 def _normalize_for_match(text: str) -> str:
@@ -140,296 +77,216 @@ def _normalize_for_match(text: str) -> str:
 
 def _expand_locality_variants(normalized_query: str) -> list[str]:
     variants = {normalized_query}
-    if normalized_query == "челны":
-        variants.add("набережные челны")
-    if normalized_query.endswith("ь"):
-        variants.add(normalized_query[:-1])
-    if "г " in normalized_query:
-        variants.add(normalized_query.replace("г ", "").strip())
+    if normalized_query == "челны": variants.add("набережные челны")
+    if normalized_query.endswith("ь"): variants.add(normalized_query[:-1])
+    if "г " in normalized_query: variants.add(normalized_query.replace("г ", "").strip())
     return [v for v in variants if v]
 
 
-def format_institutions_response(locality: str, rows: list[dict], total_count: int, page: int) -> str:
-    if not rows:
-        return (
-            f"По запросу «{locality}» ничего не нашлось.\n"
-            "Попробуйте другой город/населенный пункт или уточните написание."
-        )
-
-    if page == 0:
-        summary = f"Найдено: {total_count}. Показаны первые 5."
-    else:
-        start_idx = page * CENTERS_PAGE_SIZE + 1
-        end_idx = min(total_count, (page + 1) * CENTERS_PAGE_SIZE)
-        summary = f"Найдено: {total_count}. Показаны {start_idx}-{end_idx}."
-
-    parts = [f"Нашел организации по запросу «{locality}»:\n{summary}"]
-    for idx, row in enumerate(rows, start=1):
-        name = _clean_field_value(row.get("name"), fallback="Без названия")
-        address_phone = _clean_field_value(row.get("address_phone"))
-        head_name = _clean_field_value(row.get("head_name"))
-        web_resources = _clean_field_value(row.get("web_resources"))
-        parts.append(
-            f"{idx}) {name}\n"
-            f"   Адрес/контакты: {address_phone}\n"
-            f"   Руководитель: {head_name}\n"
-            f"   Ресурсы: {web_resources}"
-        )
-    return "\n\n".join(parts)
-
-
 def _clean_field_value(value: str | None, fallback: str = "Не указано") -> str:
-    if not value:
-        return fallback
+    if not value: return fallback
     cleaned = str(value).replace("\n", " ")
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     cleaned = re.sub(r"\s*,\s*", ", ", cleaned)
     return cleaned or fallback
 
 
+def search_institutions_by_locality(locality: str, max_results: int = 200) -> list[dict]:
+    query = locality.strip()
+    if not query or not YOUTH_POLICY_DB_PATH.exists(): return []
+
+    with sqlite3.connect(YOUTH_POLICY_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        all_rows = conn.execute("SELECT name, address_phone, head_name, web_resources FROM institutions").fetchall()
+
+    normalized_query = _normalize_for_match(query)
+    if not normalized_query: return []
+    query_variants = _expand_locality_variants(normalized_query)
+
+    direct_matches = []
+    for row in all_rows:
+        combined = _normalize_for_match(f"{row['name']} {row['address_phone']}")
+        if any(variant in combined for variant in query_variants):
+            direct_matches.append(dict(row))
+
+    if direct_matches: return direct_matches[:max_results]
+
+    ranked = []
+    for row in all_rows:
+        name = _normalize_for_match(row["name"] or "")
+        score = max(SequenceMatcher(None, variant, name).ratio() for variant in query_variants)
+        if score >= 0.55: ranked.append((score, dict(row)))
+
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    return [item[1] for item in ranked[:max_results]]
+
+
+def format_institutions_response(locality: str, rows: list[dict], total_count: int, page: int) -> str:
+    if not rows: return f"По запросу «{locality}» ничего не нашлось."
+    start_idx = page * CENTERS_PAGE_SIZE + 1
+    end_idx = min(total_count, (page + 1) * CENTERS_PAGE_SIZE)
+    header = f"Организации по запросу «{locality}»:\n(Найдено: {total_count}, показаны {start_idx}-{end_idx})\n"
+    parts = [header]
+    for idx, row in enumerate(rows, start=1):
+        parts.append(f"{idx}) {row.get('name')}\n   Адрес: {_clean_field_value(row.get('address_phone'))}")
+    return "\n\n".join(parts)
+
+
 def get_centers_page_kb(page: int, total_count: int):
     kb = InlineKeyboardBuilder()
-    total_pages = max(1, (total_count + CENTERS_PAGE_SIZE - 1) // CENTERS_PAGE_SIZE)
-
-    nav_buttons = []
-    if page > 0:
-        nav_buttons.append(CallbackButton(text="⬅️", payload=f"{CALLBACK_CENTERS_PAGE_PREFIX}{page - 1}"))
-    if page < total_pages - 1:
-        nav_buttons.append(CallbackButton(text="➡️", payload=f"{CALLBACK_CENTERS_PAGE_PREFIX}{page + 1}"))
-    if nav_buttons:
-        kb.row(*nav_buttons)
-
+    total_pages = (total_count + CENTERS_PAGE_SIZE - 1) // CENTERS_PAGE_SIZE
+    nav = []
+    if page > 0: nav.append(CallbackButton(text="⬅️", payload=f"{CALLBACK_CENTERS_PAGE_PREFIX}{page - 1}"))
+    if page < total_pages - 1: nav.append(
+        CallbackButton(text="➡️", payload=f"{CALLBACK_CENTERS_PAGE_PREFIX}{page + 1}"))
+    if nav: kb.row(*nav)
     kb.row(CallbackButton(text="Назад", payload=CALLBACK_BACK))
     return kb.as_markup()
 
 
-async def send_centers_results_page(event, user_id: str, page: int):
-    cached = SEARCH_RESULTS_CACHE.get(user_id)
-    if not cached:
-        text = "Поиск не найден в истории. Введите город или населенный пункт заново."
-        if isinstance(event, MessageCallback) and event.message is not None:
-            await event.answer()
-            await event.message.edit(text=text, attachments=[get_back_kb()])
-        else:
-            await event.message.answer(text, attachments=[get_back_kb()])
-        return
+# --- ОСНОВНЫЕ ФУНКЦИИ ОТПРАВКИ ---
 
-    locality = cached["query"]
-    results = cached["results"]
-    total_count = len(results)
-    total_pages = max(1, (total_count + CENTERS_PAGE_SIZE - 1) // CENTERS_PAGE_SIZE)
-    safe_page = max(0, min(page, total_pages - 1))
-    start = safe_page * CENTERS_PAGE_SIZE
-    end = start + CENTERS_PAGE_SIZE
-    page_rows = results[start:end]
-
-    text = format_institutions_response(locality, page_rows, total_count=total_count, page=safe_page)
-    markup = get_centers_page_kb(safe_page, total_count)
-
-    if isinstance(event, MessageCallback) and event.message is not None:
-        await event.answer()
-        await event.message.edit(text=text, attachments=[markup])
-    else:
-        await event.message.answer(text, attachments=[markup])
-
-
-async def send_welcome(event, user_id):
-    """Отправляет приветственное сообщение и главное меню"""
-    assistant_client.reset_user(user_id)
-    assistant_client.set_state(user_id, "DEFAULT")
+async def send_welcome(event, target_id):
+    """Отправляет приветственное сообщение, картинку и главное меню в ОДНОМ сообщении"""
+    target_id_str = str(target_id)
+    assistant_client.reset_user(target_id_str)
+    assistant_client.set_state(target_id_str, "DEFAULT")
+    URL = "https://xn-----6kcca1a0clhajkadginefbh2i.xn--p1ai/%D0%A1%D0%BE%D0%B3%D0%BB%D0%B0%D1%81%D0%B8%D0%B5%20%D0%BD%D0%B0%20%D0%9E%D0%9F%D0%94.pdf"
     text = (
-        "Привет! 👋 \nЯ — твой ИИ-помощник по возможностям для молодёжи в Татарстане и России. 🧭 \n\n"
-        "Выбери нужный раздел в меню ниже.\n\n"
-        "\n_Продолжая пользоваться ботом, ты принимаешь [Соглашение на обработку персональных данных](https://clck.su/NeKDn)._"
+        "Привет! 👋\n"
+"Я — твой ИИ-помощник по возможностям для молодёжи в Татарстане и России. 🧭\n" 
+"Выбери нужный раздел в меню ниже.\n\n"
+f"_Продолжая пользоваться ботом, ты принимаешь [Соглашение на обработку персональных данных]({URL})._"
     )
+
     kb = InlineKeyboardBuilder()
     kb.row(CallbackButton(text="Задать вопрос", payload=CALLBACK_ASK))
     kb.row(CallbackButton(text="Поиск молодежных центров", payload=CALLBACK_CENTERS_SEARCH))
     kb.row(CallbackButton(text="Галерея (в разработке)", payload=CALLBACK_GALLERY))
     kb.row(CallbackButton(text="Портфолио (в разработке)", payload=CALLBACK_PORTFOLIO))
-    kb.row(
-        CallbackButton(
-            text="Проверить грантовую заявку (в разработке)",
-            payload=CALLBACK_GRANT_CHECK,
-        )
-    )
-
+    kb.row(CallbackButton(text="Проверить грантовую заявку (в разработке)", payload=CALLBACK_GRANT_CHECK))
     markup = kb.as_markup()
-    chat_id = event.chat_id if hasattr(event, 'chat_id') else event.message.recipient.chat_id
 
+    # Редактирование (для MessageCallback, например, кнопка "Назад")
     if isinstance(event, MessageCallback) and event.message is not None:
         await event.answer()
+        # При редактировании картинку менять нельзя, редактируем только текст и кнопки
         await event.message.edit(text="👇 Главное меню:", attachments=[markup], format=ParseMode.MARKDOWN)
         return
 
+    # --- ИЗМЕНЕНИЕ: СОЕДИНЯЕМ КАРТИНКУ ---
+    # Подготавливаем список вложений для одного сообщения
+    welcome_attachments = []
+    image_attachment = None
+
+    # 1. Если файл картинки существует, создаем InputMedia и добавляем
     if IMAGE_PATH.exists():
+        image_attachment = InputMedia(str(IMAGE_PATH))
+        welcome_attachments.append(image_attachment)
+
+    # 2. Всегда добавляем клавиатуру во вложения
+    welcome_attachments.append(markup)
+
+    # 3. Отправляем ОДНО сообщение
+    try:
+        # Пробуем отправить всё вместе
+        await bot.send_message(
+            chat_id=target_id_str,
+            text=text,
+            attachments=welcome_attachments,
+            format=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        logger.error(f"Ошибка объединенной отправки: {e}. Пробуем отправить без картинки.")
+        # FALLBACK: Если отправка с картинкой упала, пробуем отправить только текст и кнопки.
         try:
-            await event.bot.send_message(chat_id=chat_id, text=text, attachments=[InputMedia(str(IMAGE_PATH))],
-                                         format=ParseMode.MARKDOWN)
-            await event.bot.send_message(chat_id=chat_id, text="👇 Главное меню:", attachments=[markup],
-                                         format=ParseMode.MARKDOWN)
-        except Exception as e:
-            logger.error(f"Ошибка отправки медиа: {e}")
-            await event.bot.send_message(chat_id=chat_id, text=text, attachments=[markup], format=ParseMode.MARKDOWN)
-    else:
-        await event.bot.send_message(chat_id=chat_id, text=text, attachments=[markup], format=ParseMode.MARKDOWN)
+            # Если картинка была в списке, удаляем её
+            if image_attachment and image_attachment in welcome_attachments:
+                welcome_attachments.remove(image_attachment)
+
+            # Пробуем еще раз (с текстом и кнопками)
+            await bot.send_message(
+                chat_id=target_id_str,
+                text=text,
+                attachments=welcome_attachments,
+                format=ParseMode.MARKDOWN
+            )
+        except Exception as e2:
+            logger.critical(f"Критическая ошибка fallback отправки приветствия: {e2}")
 
 
 async def send_project_menu(event, user_id):
-    """Отправляет меню выбора проекта"""
-    assistant_client.set_state(user_id, "SELECT_PROJECT")
+    assistant_client.set_state(str(user_id), "SELECT_PROJECT")
     text = "Выбери проект, по которому хочешь задать вопрос:"
     kb = InlineKeyboardBuilder()
-    kb.row(
-        CallbackButton(text="Большая перемена", payload="project:bp"),
-        CallbackButton(text="Твой Ход", payload="project:tvoyhod"),
-    )
-    kb.row(
-        CallbackButton(text="Форумы", payload="project:forums"),
-        CallbackButton(text="Гранты (в разработке)", payload="project:grants"),
-    )
+    kb.row(CallbackButton(text="Большая перемена", payload="project:bp"),
+           CallbackButton(text="Твой Ход", payload="project:tvoyhod"))
+    kb.row(CallbackButton(text="Форумы", payload="project:forums"),
+           CallbackButton(text="Гранты", payload="project:grants"))
     kb.row(CallbackButton(text="Назад", payload=CALLBACK_BACK))
 
-    markup = kb.as_markup()
     if isinstance(event, MessageCallback) and event.message is not None:
         await event.answer()
-        await event.message.edit(text=text, attachments=[markup])
-        return
-
-    await event.message.answer(text, attachments=[markup])
-
-
-async def send_centers_search_prompt(event, user_id):
-    """Переводит пользователя в режим поиска молодежных центров."""
-    assistant_client.set_state(user_id, "SEARCH_CENTER")
-    SEARCH_RESULTS_CACHE.pop(user_id, None)
-    text = "Введите город или населенный пункт, и я найду подходящие молодежные центры."
-    if isinstance(event, MessageCallback) and event.message is not None:
-        await event.answer()
-        await event.message.edit(text=text, attachments=[get_back_kb()])
-        return
-    await event.message.answer(text, attachments=[get_back_kb()])
+        await event.message.edit(text=text, attachments=[kb.as_markup()])
+    else:
+        await event.message.answer(text, attachments=[kb.as_markup()])
 
 
 async def handle_ai_stream(event, user_id, text, intent):
-    """Обработка стриминга ответа от нейросети"""
     status_msg = await event.message.answer("⏳ *Изучаю запрос...*", format=ParseMode.MARKDOWN)
-
-    update_count = 0
-    UPDATE_STEP = 10
     partial_text = ""
-
     try:
-        # Используем генератор ask_stream из ai_client.py
-        for chunk_text in assistant_client.ask_stream(user_id, text, explicit_intent=intent):
-            partial_text = chunk_text
-            update_count += 1
-            if update_count % UPDATE_STEP == 0:
-                try:
-                    await status_msg.message.edit(text=partial_text)
-                except Exception:
-                    pass
-    except Exception as e:
-        logger.error(f"Ошибка при стриминге: {e}")
-        partial_text = "Произошла ошибка при генерации ответа."
-
-    try:
+        for chunk in assistant_client.ask_stream(str(user_id), text, explicit_intent=intent):
+            partial_text = chunk
         await status_msg.message.edit(text=partial_text, format=ParseMode.MARKDOWN)
         await event.message.answer("Спроси еще или вернись назад:", attachments=[get_back_kb()])
-    except Exception:
-        pass
+    except:
+        await status_msg.message.edit(text="Ошибка генерации.")
 
 
 # --- ХЕНДЛЕРЫ ---
 
 @dp.bot_started()
 async def on_bot_started(event: BotStarted):
-    user_id = str(event.user_id or event.chat_id)
-    db.log_interaction(user_id, "COMMAND", "BotStarted")
-    await send_welcome(event, user_id)
+    # СОГЛАСНО ДОКУМЕНТАЦИИ: используем chat_id
+    target_id = str(event.chat_id)
+    logger.info(f"⚡️ Бот запущен в чате {target_id}")
+    await send_welcome(event, target_id)
 
 
 @dp.message_created()
 async def on_message(event: MessageCreated):
     body = event.message.body
-    text = ""
-
-    if isinstance(body, str):
-        text = body
-    else:
-        text = str(getattr(body, "text", getattr(body, "caption", "")))
-
-    if text == "None": text = ""
+    text = body if isinstance(body, str) else str(getattr(body, "text", ""))
+    if not text or text == "None": return
     text = text.strip()
 
-    sender = event.message.sender
-    user_id = str(sender.user_id if sender else event.message.recipient.chat_id)
-    db.upsert_user(user_id, sender)
+    chat_id = str(event.message.recipient.chat_id)
+    user_id = str(event.message.sender.user_id if event.message.sender else chat_id)
     state = assistant_client.get_state(user_id)
 
-    if not text: return
-
     if text.lower() in ["/start", "старт", "начать"]:
-        await send_welcome(event, user_id)
+        await send_welcome(event, chat_id)
         return
 
-    # Логика кнопки "Назад" с соблюдением вложенности
     if text.lower() == "назад":
         if state == "CHATTING":
             await send_project_menu(event, user_id)
         else:
-            await send_welcome(event, user_id)
-        return
-
-    if text in ["Галерея (в разработке)", "Портфолио (в разработке)", "Проверить грантовую заявку (в разработке)"]:
-        await event.message.answer("Этот раздел находится в разработке 🛠", attachments=[get_back_kb()])
-        return
-
-    if state == "DEFAULT":
-        if text == "Задать вопрос":
-            await send_project_menu(event, user_id)
-        elif text == "Поиск молодежных центров":
-            await send_centers_search_prompt(event, user_id)
-        else:
-            await event.message.answer("Воспользуйтесь кнопками меню.")
-        return
-
-    project_map = {
-        "Большая перемена": "BP",
-        "Твой Ход": "TVOYHOD",
-        "Форумы": "FORUMS",
-        "Гранты": "GRANTS"
-    }
-
-    if state == "SELECT_PROJECT":
-        if text in project_map:
-            assistant_client.set_project(user_id, project_map[text])
-            assistant_client.set_state(user_id, "CHATTING")
-            await event.message.answer(f"Я готов отвечать по теме «{text}». Жду твой вопрос!",
-                                       attachments=[get_back_kb()])
-        else:
-            await event.message.answer("Выберите проект из списка.", attachments=[get_back_kb()])
+            await send_welcome(event, chat_id)
         return
 
     if state == "CHATTING":
-        try:
-            await event.bot.send_chat_action(chat_id=user_id, action="typing")
-        except:
-            pass
-        current_project = assistant_client.get_project(user_id)
-        asyncio.create_task(handle_ai_stream(event, user_id, text, current_project))
+        asyncio.create_task(handle_ai_stream(event, user_id, text, assistant_client.get_project(user_id)))
         return
 
-    if state == "SEARCH_CENTER":
-        matches = search_institutions_by_locality(text)
-        SEARCH_RESULTS_CACHE[user_id] = {"query": text, "results": matches}
-        await send_centers_results_page(event, user_id, page=0)
-        return
+    if state == "DEFAULT":
+        await send_welcome(event, chat_id)
 
 
 @dp.message_callback()
 async def on_callback(event: MessageCallback):
-    payload = (event.callback.payload or "").strip().lower()
+    payload = (event.callback.payload or "").lower()
     user_id = str(event.callback.user.user_id)
     state = assistant_client.get_state(user_id)
 
@@ -445,41 +302,20 @@ async def on_callback(event: MessageCallback):
         return
 
     if payload == CALLBACK_CENTERS_SEARCH:
-        await send_centers_search_prompt(event, user_id)
-        return
-
-    if payload.startswith(CALLBACK_CENTERS_PAGE_PREFIX):
-        try:
-            page = int(payload.split(":")[-1])
-        except Exception:
-            page = 0
-        await send_centers_results_page(event, user_id, page=page)
-        return
-
-    if payload in {CALLBACK_GALLERY, CALLBACK_PORTFOLIO, CALLBACK_GRANT_CHECK}:
-        if event.message is not None:
-            await event.answer()
-            await event.message.edit(
-                text="Этот раздел находится в разработке 🛠",
-                attachments=[get_back_kb()],
-            )
+        assistant_client.set_state(user_id, "SEARCH_CENTER")
+        await event.message.edit(text="Введите город для поиска центров:", attachments=[get_back_kb()])
         return
 
     if payload in PROJECT_PAYLOAD_MAP:
-        project_title, project_intent = PROJECT_PAYLOAD_MAP[payload]
-        assistant_client.set_project(user_id, project_intent)
+        title, intent = PROJECT_PAYLOAD_MAP[payload]
+        assistant_client.set_project(user_id, intent)
         assistant_client.set_state(user_id, "CHATTING")
-        if event.message is not None:
-            await event.answer()
-            await event.message.edit(
-                text=f"Я готов отвечать по теме «{project_title}». Жду твой вопрос!",
-                attachments=[get_back_kb()],
-            )
-        return
+        await event.answer()
+        await event.message.edit(text=f"Вы выбрали «{title}». Слушаю твой вопрос!", attachments=[get_back_kb()])
 
 
 async def main():
-    logger.info("Бот запущен на библиотеке maxapi (Long Polling)")
+    logger.info("Бот запущен...")
     await dp.start_polling(bot)
 
 
