@@ -238,9 +238,9 @@ async def send_welcome(event, user_id):
     assistant_client.reset_user(user_id)
     assistant_client.set_state(user_id, "DEFAULT")
     text = (
-        "Привет! Я — твой ИИ-навигатор по молодежной политике Татарстана и федеральным проектам. 🧭\n\n"
-        "Выбери нужный раздел в главном меню:\n\n"
-        "\n_Продолжая работу с ботом, вы принимаете [Согласие на обработку персональных данных](https://clck.su/NeKDn)._"
+        "Привет! 👋 \nЯ — твой ИИ-помощник по возможностям для молодёжи в Татарстане и России. 🧭 \n\n"
+        "Выбери нужный раздел в меню ниже.\n\n"
+        "\n_Продолжая пользоваться ботом, ты принимаешь [Соглашение на обработку персональных данных](https://clck.su/NeKDn)._"
     )
     kb = InlineKeyboardBuilder()
     kb.row(CallbackButton(text="Задать вопрос", payload=CALLBACK_ASK))
@@ -335,7 +335,7 @@ async def handle_ai_stream(event, user_id, text, intent):
 
     try:
         await status_msg.message.edit(text=partial_text, format=ParseMode.MARKDOWN)
-        await event.message.answer("В любой момент можно вернуться:", attachments=[get_back_kb()])
+        await event.message.answer("Спроси еще или вернись назад:", attachments=[get_back_kb()])
     except Exception:
         pass
 
