@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import html
 import re
 import sqlite3
 from difflib import SequenceMatcher
@@ -41,6 +40,7 @@ assistant_client = PromptAgentClient(settings, db)
 # Константы колбэков
 CALLBACK_BACK = "back"
 CALLBACK_ASK = "menu:ask"
+CALLBACK_EVENTS = "menu:events"  # НОВЫЙ РАЗДЕЛ
 CALLBACK_GALLERY = "menu:gallery"
 CALLBACK_PORTFOLIO = "menu:portfolio"
 CALLBACK_GRANT_CHECK = "menu:grant_check"
@@ -62,157 +62,69 @@ SEARCH_RESULTS_CACHE: dict[str, dict] = {}
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
 def get_back_kb():
-    """Клавиатура с кнопкой Назад"""
     kb = InlineKeyboardBuilder()
     kb.row(CallbackButton(text="Назад", payload=CALLBACK_BACK))
     return kb.as_markup()
 
 
-def _normalize_for_match(text: str) -> str:
-    normalized = (text or "").lower().replace("ё", "е")
-    normalized = re.sub(r"[^a-zа-я0-9\s-]", " ", normalized)
-    normalized = re.sub(r"\s+", " ", normalized).strip()
-    return normalized
+# --- ФУНКЦИИ ОТПРАВКИ СОБЫТИЙ ---
 
+async def send_events_list(event, target_id):
+    """Описание мероприятий на текущую неделю"""
+    text = (
+        "📅 **События этой недели (27 апреля – 3 мая)**\n\n"
+        "🔹 **27.04 (Пн)** — Старт регистрации на форум «ШУМ». Если хочешь в медиа — не проспи!\n"
+        "🔹 **28.04 (Вт)** — Вебинар: «Как оформить смету гранта и не поседеть». В 18:00 в канале Росмолодежи.\n"
+        "🔹 **30.04 (Чт)** — Дедлайн подачи заявок в трек «Делаю» проекта **Твой Ход**. Успей загрузить паспорт проекта!\n"
+        "🔹 **01.05 (Пт)** — Маевка в экстрим-парке «УРАМ» (Казань). Контесты, музыка и чилл.\n"
+        "🔹 **02.05 (Сб)** — Нетворкинг-встреча резидентов Иннополиса. Обсуждаем стартапы и AI-тренды.\n\n"
+        "📍 Подробности и ссылки на регистрацию можно найти в официальных сообществах Министерства по делам молодежи РТ."
+    )
 
-def _expand_locality_variants(normalized_query: str) -> list[str]:
-    variants = {normalized_query}
-    if normalized_query == "челны": variants.add("набережные челны")
-    if normalized_query.endswith("ь"): variants.add(normalized_query[:-1])
-    if "г " in normalized_query: variants.add(normalized_query.replace("г ", "").strip())
-    return [v for v in variants if v]
+    if isinstance(event, MessageCallback) and event.message is not None:
+        await event.answer()
+        await event.message.edit(text=text, attachments=[get_back_kb()], format=ParseMode.MARKDOWN)
+    else:
+        await bot.send_message(chat_id=str(target_id), text=text, attachments=[get_back_kb()],
+                               format=ParseMode.MARKDOWN)
 
-
-def _clean_field_value(value: str | None, fallback: str = "Не указано") -> str:
-    if not value: return fallback
-    cleaned = str(value).replace("\n", " ")
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    cleaned = re.sub(r"\s*,\s*", ", ", cleaned)
-    return cleaned or fallback
-
-
-def search_institutions_by_locality(locality: str, max_results: int = 200) -> list[dict]:
-    query = locality.strip()
-    if not query or not YOUTH_POLICY_DB_PATH.exists(): return []
-
-    with sqlite3.connect(YOUTH_POLICY_DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        all_rows = conn.execute("SELECT name, address_phone, head_name, web_resources FROM institutions").fetchall()
-
-    normalized_query = _normalize_for_match(query)
-    if not normalized_query: return []
-    query_variants = _expand_locality_variants(normalized_query)
-
-    direct_matches = []
-    for row in all_rows:
-        combined = _normalize_for_match(f"{row['name']} {row['address_phone']}")
-        if any(variant in combined for variant in query_variants):
-            direct_matches.append(dict(row))
-
-    if direct_matches: return direct_matches[:max_results]
-
-    ranked = []
-    for row in all_rows:
-        name = _normalize_for_match(row["name"] or "")
-        score = max(SequenceMatcher(None, variant, name).ratio() for variant in query_variants)
-        if score >= 0.55: ranked.append((score, dict(row)))
-
-    ranked.sort(key=lambda x: x[0], reverse=True)
-    return [item[1] for item in ranked[:max_results]]
-
-
-def format_institutions_response(locality: str, rows: list[dict], total_count: int, page: int) -> str:
-    if not rows: return f"По запросу «{locality}» ничего не нашлось."
-    start_idx = page * CENTERS_PAGE_SIZE + 1
-    end_idx = min(total_count, (page + 1) * CENTERS_PAGE_SIZE)
-    header = f"Организации по запросу «{locality}»:\n(Найдено: {total_count}, показаны {start_idx}-{end_idx})\n"
-    parts = [header]
-    for idx, row in enumerate(rows, start=1):
-        parts.append(f"{idx}) {row.get('name')}\n   Адрес: {_clean_field_value(row.get('address_phone'))}")
-    return "\n\n".join(parts)
-
-
-def get_centers_page_kb(page: int, total_count: int):
-    kb = InlineKeyboardBuilder()
-    total_pages = (total_count + CENTERS_PAGE_SIZE - 1) // CENTERS_PAGE_SIZE
-    nav = []
-    if page > 0: nav.append(CallbackButton(text="⬅️", payload=f"{CALLBACK_CENTERS_PAGE_PREFIX}{page - 1}"))
-    if page < total_pages - 1: nav.append(
-        CallbackButton(text="➡️", payload=f"{CALLBACK_CENTERS_PAGE_PREFIX}{page + 1}"))
-    if nav: kb.row(*nav)
-    kb.row(CallbackButton(text="Назад", payload=CALLBACK_BACK))
-    return kb.as_markup()
-
-
-# --- ОСНОВНЫЕ ФУНКЦИИ ОТПРАВКИ ---
 
 async def send_welcome(event, target_id):
-    """Отправляет приветственное сообщение, картинку и главное меню в ОДНОМ сообщении"""
     target_id_str = str(target_id)
     assistant_client.reset_user(target_id_str)
     assistant_client.set_state(target_id_str, "DEFAULT")
-    URL = "https://xn-----6kcca1a0clhajkadginefbh2i.xn--p1ai/%D0%A1%D0%BE%D0%B3%D0%BB%D0%B0%D1%81%D0%B8%D0%B5%20%D0%BD%D0%B0%20%D0%9E%D0%9F%D0%94.pdf"
+
     text = (
-        "Привет! 👋\n"
-"Я — твой ИИ-помощник по возможностям для молодёжи в Татарстане и России. 🧭\n" 
-"Выбери нужный раздел в меню ниже.\n\n"
-f"_Продолжая пользоваться ботом, ты принимаешь [Соглашение на обработку персональных данных]({URL})._"
+        "Привет! 👋 \nЯ — твой ИИ-помощник по возможностям для молодёжи в Татарстане. 🧭 \n\n"
+        "Выбери нужный раздел в меню ниже.\n\n"
+        "\n_Продолжая пользоваться ботом, ты принимаешь [Согласие на обработку персональных данных](https://clck.su/NeKDn)._"
     )
 
     kb = InlineKeyboardBuilder()
     kb.row(CallbackButton(text="Задать вопрос", payload=CALLBACK_ASK))
+    kb.row(CallbackButton(text="📅 События недели", payload=CALLBACK_EVENTS))  # НОВАЯ КНОПКА
     kb.row(CallbackButton(text="Поиск молодежных центров", payload=CALLBACK_CENTERS_SEARCH))
     kb.row(CallbackButton(text="Галерея (в разработке)", payload=CALLBACK_GALLERY))
     kb.row(CallbackButton(text="Портфолио (в разработке)", payload=CALLBACK_PORTFOLIO))
     kb.row(CallbackButton(text="Проверить грантовую заявку (в разработке)", payload=CALLBACK_GRANT_CHECK))
     markup = kb.as_markup()
 
-    # Редактирование (для MessageCallback, например, кнопка "Назад")
     if isinstance(event, MessageCallback) and event.message is not None:
         await event.answer()
-        # При редактировании картинку менять нельзя, редактируем только текст и кнопки
         await event.message.edit(text="👇 Главное меню:", attachments=[markup], format=ParseMode.MARKDOWN)
         return
 
-    # --- ИЗМЕНЕНИЕ: СОЕДИНЯЕМ КАРТИНКУ ---
-    # Подготавливаем список вложений для одного сообщения
     welcome_attachments = []
-    image_attachment = None
-
-    # 1. Если файл картинки существует, создаем InputMedia и добавляем
     if IMAGE_PATH.exists():
-        image_attachment = InputMedia(str(IMAGE_PATH))
-        welcome_attachments.append(image_attachment)
-
-    # 2. Всегда добавляем клавиатуру во вложения
+        welcome_attachments.append(InputMedia(str(IMAGE_PATH)))
     welcome_attachments.append(markup)
 
-    # 3. Отправляем ОДНО сообщение
     try:
-        # Пробуем отправить всё вместе
-        await bot.send_message(
-            chat_id=target_id_str,
-            text=text,
-            attachments=welcome_attachments,
-            format=ParseMode.MARKDOWN
-        )
+        await bot.send_message(chat_id=target_id_str, text=text, attachments=welcome_attachments,
+                               format=ParseMode.MARKDOWN)
     except Exception as e:
-        logger.error(f"Ошибка объединенной отправки: {e}. Пробуем отправить без картинки.")
-        # FALLBACK: Если отправка с картинкой упала, пробуем отправить только текст и кнопки.
-        try:
-            # Если картинка была в списке, удаляем её
-            if image_attachment and image_attachment in welcome_attachments:
-                welcome_attachments.remove(image_attachment)
-
-            # Пробуем еще раз (с текстом и кнопками)
-            await bot.send_message(
-                chat_id=target_id_str,
-                text=text,
-                attachments=welcome_attachments,
-                format=ParseMode.MARKDOWN
-            )
-        except Exception as e2:
-            logger.critical(f"Критическая ошибка fallback отправки приветствия: {e2}")
+        logger.error(f"Ошибка отправки: {e}")
+        await bot.send_message(chat_id=target_id_str, text=text, attachments=[markup], format=ParseMode.MARKDOWN)
 
 
 async def send_project_menu(event, user_id):
@@ -248,9 +160,7 @@ async def handle_ai_stream(event, user_id, text, intent):
 
 @dp.bot_started()
 async def on_bot_started(event: BotStarted):
-    # СОГЛАСНО ДОКУМЕНТАЦИИ: используем chat_id
     target_id = str(event.chat_id)
-    logger.info(f"⚡️ Бот запущен в чате {target_id}")
     await send_welcome(event, target_id)
 
 
@@ -299,6 +209,10 @@ async def on_callback(event: MessageCallback):
 
     if payload == CALLBACK_ASK:
         await send_project_menu(event, user_id)
+        return
+
+    if payload == CALLBACK_EVENTS:  # ОБРАБОТКА НАЖАТИЯ
+        await send_events_list(event, user_id)
         return
 
     if payload == CALLBACK_CENTERS_SEARCH:
