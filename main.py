@@ -213,8 +213,6 @@ async def send_welcome(event, user_id):
 
     if isinstance(event, MessageCallback) and event.message is not None:
         await event.answer()
-        await event.message.edit(text="👇 Главное меню:", attachments=[markup], format=ParseMode.MARKDOWN)
-        return
 
     welcome_attachments = []
     if IMAGE_PATH.exists():
