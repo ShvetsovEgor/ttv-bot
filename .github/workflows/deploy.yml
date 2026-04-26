@@ -1,0 +1,26 @@
+name: Deploy ttv-bot
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
+          script: |
+            cd /home/shvetsovegor/ttv-bot
+            
+            source .venv/bin/activate
+            
+            git pull origin main
+            
+            pip install -r requirements.txt
+            
+            sudo systemctl restart ttv-bot
